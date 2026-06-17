@@ -1,0 +1,78 @@
+{
+  "processor": "Paynuity",
+  "merchant_name": "HEALTHSUITEINC",
+  "mid": "745300000396879",
+  "period": "August 31, 2025",
+  "source_file": "CORE VITAL MEDICAL.pdf",
+  "volume": 26274.09,
+  "transactions": 1231,
+  "avg_ticket": 21.34,
+  "fees": {
+    "interchange": 605.62,
+    "network_assessment": 99.37,
+    "processor_markup": 1757.32,
+    "account_other": 512.3,
+    "total": 2974.61,
+    "passthrough": 704.99
+  },
+  "rates": {
+    "effective": 0.1132145775553026,
+    "interchange": 0.023050084703219027,
+    "network_assessment": 0.0037820529654880534,
+    "processor_markup": 0.0668841432757519
+  },
+  "card_mix": [
+    {
+      "brand": "Visa",
+      "volume": 8739.45,
+      "items": 55
+    },
+    {
+      "brand": "VisaDebit",
+      "volume": 4778.47,
+      "items": 193
+    },
+    {
+      "brand": "MasterCard",
+      "volume": 6329.58,
+      "items": 42
+    },
+    {
+      "brand": "MasterCardDebit",
+      "volume": 4979.69,
+      "items": 31
+    },
+    {
+      "brand": "MasterCardBusiness",
+      "volume": 1446.9,
+      "items": 910
+    }
+  ],
+  "risk_flags": [
+    {
+      "flag": "high_effective_rate",
+      "severity": "WARNING",
+      "detail": "Gross effective rate: 11.32%"
+    },
+    {
+      "flag": "excessive_chargebacks",
+      "severity": "CRITICAL",
+      "detail": "Chargeback ratio: 1.30% (16/1231)"
+    },
+    {
+      "flag": "chargeback_dollar_ratio",
+      "severity": "CRITICAL",
+      "detail": "Chargeback $ ratio: 9.96%"
+    },
+    {
+      "flag": "misc_charges_present",
+      "severity": "REVIEW",
+      "detail": "Other/misc fees: $512.30"
+    }
+  ],
+  "reconciliation": {
+    "checks": 18,
+    "passed": 18,
+    "all_passed": true
+  }
+}

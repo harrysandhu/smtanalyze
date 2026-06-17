@@ -1,0 +1,63 @@
+{
+  "processor": "Fiserv (CardPointe)",
+  "merchant_name": "CITY OF PBG SANDHILL 2",
+  "mid": "496372494880",
+  "period": "01/01/26 - 01/31/26",
+  "source_file": "2026.02.03 Sandhill Crane - 12,654.34.pdf",
+  "volume": 446986.19,
+  "transactions": 3447,
+  "avg_ticket": 129.67,
+  "fees": {
+    "interchange": 7568.92,
+    "network_assessment": 757.83,
+    "processor_markup": 4040.87,
+    "account_other": 286.72,
+    "total": 12654.34,
+    "passthrough": 8326.75
+  },
+  "rates": {
+    "effective": 0.028310360103071638,
+    "interchange": 0.016933230084804185,
+    "network_assessment": 0.0016954215073177092,
+    "processor_markup": 0.009040256926058499
+  },
+  "card_mix": [
+    {
+      "brand": "Mastercard",
+      "volume": 110423.31,
+      "items": 869
+    },
+    {
+      "brand": "VISA",
+      "volume": 212783.84,
+      "items": 1694
+    },
+    {
+      "brand": "Discover",
+      "volume": 6040.37,
+      "items": 68
+    },
+    {
+      "brand": "AMEX ACQ",
+      "volume": 117738.67,
+      "items": 816
+    }
+  ],
+  "risk_flags": [
+    {
+      "flag": "dispute_fees_present",
+      "severity": "Info",
+      "detail": "Dispute/chargeback fees detected in fee detail"
+    },
+    {
+      "flag": "intl_fees_present",
+      "severity": "Info",
+      "detail": "International/cross-border fees detected"
+    }
+  ],
+  "reconciliation": {
+    "checks": 16,
+    "passed": 16,
+    "all_passed": true
+  }
+}
