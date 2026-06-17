@@ -5,12 +5,16 @@ TypeScript service that ingests merchant statement PDFs, analyzes them with the
 processor skills, and emits a branded Interchange-Plus quote — with a
 **zero-error tolerance** on the numbers that reach a merchant.
 
-This document answers the three questions that drove it:
+This document answers the questions that drove it:
 
-1. Can we use **Agent Skills** from a Claude SDK? (Yes — two ways, below.)
-2. Do we get **web search**? (Yes — a server-side tool.)
-3. What is the right shape for a **multi-step agentic loop** that PDFs demand,
-   and how do we get to zero error rate?
+1. How do we **stop relying on brittle heuristic parsers** and extract
+   agentically with vision models, so the system doesn't break on every new
+   processor? (Section 1 — vision extracts, deterministic math verifies; the
+   web-research basis is in 1b.)
+2. Can we use **Agent Skills** from a Claude SDK? (Yes — two ways, Section 2.)
+3. Do we get **web search**? (Yes — a server-side tool, Section 3.)
+4. What is the right shape for a **multi-step agentic loop** that PDFs demand,
+   and how do we get to zero error rate? (Sections 4–5.)
 
 It is grounded in the Claude API/SDK reference as of the assistant knowledge
 cutoff (January 2026). Anywhere a number or field name could drift, it is
@@ -18,34 +22,98 @@ flagged "verify against docs."
 
 ---
 
-## 1. The core insight: agent for judgment, code for arithmetic
+## 1. The core insight: vision-LLM extracts, deterministic math verifies
 
-A merchant statement PDF is not one extraction problem; it is a pipeline of
-them, and the failure modes are different at each stage:
+The proof-of-concept in this repo extracts with per-processor regex parsers
+(`pdfplumber` + regular expressions). That is the right way to *prove the
+pipeline* — the parsers are exact and reconcile to the penny — but it is the
+**wrong long-term extraction strategy**, for exactly the reason a regex parser
+always disappoints: it encodes one processor's precise layout, so a new
+processor (every `x`-prefixed folder in the statement library) or even a layout
+revision breaks it. The industry consensus is blunt about this — rule-based
+parsing is "complicated and brittle to maintain," and the text it produces is
+"lossy compression that removes layout, alignment, and visual cues." Writing a
+new regex parser per processor does not scale and does not generalize.
 
-| Stage | Nature | Who should do it |
+So move extraction to a **vision-LLM**. But do it with eyes open about the one
+failure mode that matters here: vision models **hallucinate numbers**. Studies
+put ~68% of financial-extraction errors on hallucinated numerical values; a bare
+single-shot VLM scored ~45% on dense forms; there is now a dedicated benchmark
+(FinCriticalED, late 2025) precisely because VLMs misread financial figures at
+measurable rates. "Feed the PDF to Claude vision and trust the JSON" would be
+*less* safe on the dollars than the regex parser, not more.
+
+The resolution is the reframing that makes both halves true:
+
+> **The vision-LLM extracts (it generalizes across formats). Deterministic
+> arithmetic verifies (it guarantees the dollars). An agentic loop connects
+> them — re-examining the image and self-correcting until the numbers tie out,
+> escalating to a human when they can't.**
+
+The regex was doing two jobs at once: extracting *and* — via the reconciliation
+formulas — verifying. We split them. Extraction becomes a vision task that needs
+no per-processor code. Verification stays deterministic Python — but here is the
+load-bearing point: **the reconciliation identities are processor-agnostic in
+structure.** "Line items sum to the total," "fees = discount + interchange +
+assessments," "rate × volume + per-item × count = total" hold for a processor
+nobody has ever parsed. They validate a vision extraction from an *unseen*
+format without anyone writing new regex. The deterministic layer stops being a
+brittle per-processor *parser* and becomes a universal *checker*.
+
+| Stage | Nature | Who does it |
 | --- | --- | --- |
-| Identify the processor | Fuzzy pattern match over layout/branding | **LLM** (or a cheap fingerprint) |
-| Extract every number | Deterministic, must be exact | **Python parser** (pdfplumber + regex) |
-| Reconcile the extraction | Pure arithmetic | **Python** (reconciliation formulas) |
-| OCR a scanned/photographed statement | Vision + judgment | **LLM** (multimodal) feeding the parser |
+| Identify the processor | Fuzzy pattern match over layout/branding | **Vision-LLM** (cheap fingerprint only as a fast-path) |
+| Extract every number | Read figures off the rendered page | **Vision-LLM** + structured output, grounded to bounding boxes |
+| Reconcile the extraction | Processor-agnostic arithmetic identities | **Deterministic code** — the zero-error gate |
+| Self-correct on mismatch | Re-read the image, fix the misread | **Agentic loop** (vision-LLM) |
 | Decide pricing / apply discount | Business rule | **Code** (deterministic) |
-| Build the Excel quote | Templated, must be live formulas | **Python/`openpyxl`** (or the `xlsx` skill) |
-| Verify the quote ties out | Arithmetic | **Python** (re-evaluate formulas) |
+| Build the Excel quote | Templated, live formulas | **`xlsx` skill** / `openpyxl` |
+| Verify the quote ties out | Arithmetic | **Code** — re-evaluate the formulas |
 
-The zero-error requirement is impossible if a language model is asked to do the
-arithmetic — LLMs do not reconcile sums to the penny reliably, and "usually
-right" is not acceptable on a document a rep hands a merchant. The architecture
-therefore confines the model to **judgment** (which processor is this? is this
-page scanned? does this number look like an OCR misread?) and confines every
-dollar figure to **deterministic Python that must pass reconciliation before a
-quote is allowed to exist.** This is exactly what the proof-of-concept does:
-`run_msa.py` aborts if reconciliation is not 100%, and `verify_quote.py`
-re-evaluates the workbook's formulas with an independent engine and asserts the
-sheet ties to the parser to the penny.
+What stays exactly as in the proof-of-concept: the reconciliation gate
+(`run_msa.py` aborts unless 100%) and the independent quote verifier
+(`verify_quote.py` re-evaluates the workbook's formulas and asserts penny
+equality). Those become *more* important in a vision world, not less — they are
+what converts a model that is "usually right" into a quote that is right on
+every number that ships.
 
-The agent loop is the orchestrator and the fallback handler — not the
-calculator.
+---
+
+## 1b. Why this is the current best practice (web research, 2025–2026)
+
+Synthesis of recent benchmarks and production write-ups:
+
+- **Pure single-shot VLM is not production-grade for financial tables.** Bare
+  VLMs "frequently hallucinated or dropped content on dense financial tables";
+  ~45% accuracy on a forms benchmark; hallucinated numbers are the #1 error
+  class. This is the trap to avoid.
+- **Brittle regex/template parsing is the other trap.** Breaks on anything new;
+  lossy; high maintenance. (Our PoC parsers are the demonstration, not the
+  destination.)
+- **Agentic vision + verification is what wins.** Hybrid agentic platforms reach
+  ~90% table accuracy vs 64–83% for single-model cloud OCR. The shared recipe:
+  treat the document as a *visual object*, run *multiple extraction passes* with
+  a *critic/verification step*, and **ground every field to a bounding box**, so
+  a hallucinated value has no valid source location and is caught — and a human
+  can be shown the exact cell it came from.
+- **Critic/verification agents measurably cut hallucinations** and beat
+  single-pass, at ~2× compute. Mitigation that works: ground answers in the
+  source, require citations/coordinates, route low-confidence items to a
+  stronger model or a human, track per-field confidence.
+
+Net: the field is converging on exactly the split above — generalize with
+vision, guarantee with deterministic checks and grounding, iterate with an
+agent. For *our* problem we have an unusually strong verifier (the statement's
+own arithmetic must close), which is what lets us aim at zero error rather than
+~90%.
+
+Sources:
+- [Best LLM-Ready Document Parsers in 2025 — Reducto](https://llms.reducto.ai/best-llm-ready-document-parsers-2025)
+- [FinCriticalED: A Visual Benchmark for Financial Fact-Level OCR](https://arxiv.org/pdf/2511.14998)
+- [Why Agentic Document Extraction Finally Makes Sense (LandingAI DPT-2)](https://pub.towardsai.net/landingais-dpt-2-in-2026-why-agentic-document-extraction-finally-makes-sense-629a5115b80f)
+- [Benchmarking Multi-Agent LLM Architectures for Financial Document Processing](https://arxiv.org/pdf/2603.22651)
+- [Towards reducing hallucination in extracting information from financial documents](https://arxiv.org/pdf/2310.10760)
+- [What is Agentic Document Extraction? (2026 Guide) — Parseur](https://parseur.com/blog/agentic-document-extraction)
 
 ---
 
@@ -138,13 +206,14 @@ Where it earns its place in *this* pipeline (not the hot path):
   `web_search` + `web_fetch` can pull the published rates when the bundled
   reference PDFs are stale (>6 months), satisfying the "flag stale reference
   data" requirement in the feature spec.
-- **Unknown processor research.** When a statement matches no parser fingerprint
-  (the `x`-prefixed white-label folders), the agent can search for the
-  processor's statement format before attempting a generic extraction.
+- **Unknown processor research.** When the vision model can't confidently
+  identify a processor (the `x`-prefixed white-label folders), the agent can
+  search for the processor's statement format to inform extraction — then the
+  reconciliation gate still validates whatever it reads.
 
-Keep it off the per-statement extraction path: extraction must be deterministic
-and offline. Web search is for reference-data and onboarding-new-processors
-work, gated behind explicit steps.
+Keep it off the inner extraction loop — extraction reads the rendered page, not
+the web. Web search is for reference-data refresh and onboarding new processors,
+gated behind explicit steps.
 
 ---
 
@@ -152,32 +221,49 @@ work, gated behind explicit steps.
 
 ```
                  ┌─────────────────────────────────────────────────────────┐
-   PDF  ─────────▶  STAGE 1  Identify processor                             │
-                 │   fingerprint (regex on extracted text) → processor key  │
-                 │   miss → LLM vision/judgment + optional web_search        │
+   PDF  ─────────▶  STAGE 1  Identify processor (vision-LLM)                 │
+   (render pages   │   read branding/layout → processor key + format notes  │
+    to images)     │   unknown? → load generic skill + optional web_search   │
                  ├─────────────────────────────────────────────────────────┤
-                 │  STAGE 2  Extract (deterministic tool)                    │
-                 │   parse_<processor>(pdf) → RawStatementData (JSON)        │
-                 │   no text layer? → render @300dpi, OCR, LLM verifies      │
+                 │  STAGE 2  Extract (vision-LLM, structured output)         │
+                 │   read every figure off the rendered page →               │
+                 │   RawStatementData JSON, each value grounded to a bbox     │
                  ├─────────────────────────────────────────────────────────┤
-                 │  STAGE 3  Reconcile  ── HARD GATE ──                      │
-                 │   all checks pass?  no → repair loop (≤ N) or human queue │
+                 │  STAGE 3  Reconcile  ── HARD GATE (deterministic) ──      │
+                 │   processor-agnostic identities (sums close, fees=parts)  │
+                 │   pass? → on.  fail? → STAGE 2b                            │
+                 ├─────────────────────────────────────────────────────────┤
+                 │  STAGE 2b Self-correct (agentic loop, ≤ N)               │
+                 │   show the failing identity + bbox crops; re-read; retry  │
+                 │   still failing after N → human-review queue              │
                  ├─────────────────────────────────────────────────────────┤
                  │  STAGE 4  Normalize → NormalizedStatement (4 buckets)     │
                  ├─────────────────────────────────────────────────────────┤
                  │  STAGE 5  Quote: apply settings (15% target), live xlsx   │
                  ├─────────────────────────────────────────────────────────┤
-                 │  STAGE 6  Verify quote ── HARD GATE ──                    │
-                 │   re-evaluate formulas; penny-equal to parser? else fail  │
+                 │  STAGE 6  Verify quote ── HARD GATE (deterministic) ──    │
+                 │   re-evaluate formulas; penny-equal to extraction? else   │
+                 │   fail                                                    │
                  └─────────────────────────────────────────────────────────┘
                                        │
-                          Quote.xlsx + confidence report
+                          Quote.xlsx + confidence + grounding report
 ```
 
-Stages 1–6 mirror the Python proof-of-concept exactly (`run_msa.py` is stages
-1–5; `verify_quote.py` is stage 6). The agent's job is the arrows *between*
-stages and the **off-ramps**: an extraction that won't reconcile, a scanned
-page, a processor with no parser.
+The deterministic stages (3, 6) are lifted directly from the proof-of-concept —
+the reconciliation formulas and `verify_quote.py` are unchanged. What changes is
+stages 1–2: vision-LLM extraction replaces the per-processor regex parsers, so a
+new processor needs **knowledge** (a skill describing its layout), not new code.
+The reconciliation gate validates that extraction regardless of processor,
+because the identities are structural. The agent's real work is the **2 ⇄ 3
+self-correction loop** and the **off-ramps**: an extraction that won't reconcile
+after N tries, a page the model is unsure about, a processor it can't identify.
+
+> **Migration note.** The repo's regex parsers don't get thrown away on day one
+> — they stay as a fast, free, exact path for the handful of high-volume
+> processors already covered (Fiserv, Paynuity), and as an oracle to evaluate
+> the vision extractor against. New/long-tail processors go straight to the
+> vision path. Over time the vision path is the default and the regex parsers
+> are an optimization, not a requirement.
 
 ### Idiomatic loop control
 
@@ -195,30 +281,37 @@ page, a processor with no parser.
   subagents and reserve Opus/Fable for identification of unknown formats and
   OCR verification.
 
-### Custom tools (Option B shape)
+### Tools: a verifier, not a parser
 
-Wrap each deterministic parser as an in-process tool so the model can call it
-but never re-implement it:
+The custom tools the agent calls are the **deterministic guarantees**, not the
+extraction. The vision-LLM produces `RawStatementData` (via structured output);
+the tools then check and build:
 
 ```ts
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"; // verify import path
 import { z } from "zod";
-import { execFile } from "node:child_process";
 
-const parseFiserv = tool(
-  "parse_fiserv",
-  "Extract + reconcile a Fiserv/CardPointe statement. Returns RawStatementData JSON with a reconciliation block.",
-  { pdf_path: z.string() },
-  async ({ pdf_path }) => {
-    const out = await run("python3", ["scripts/parse_fiserv.py", pdf_path, "--json"]);
-    return { content: [{ type: "text", text: out }], structuredContent: JSON.parse(out) };
+// The model extracts via vision + structured output; this tool only CHECKS it.
+const reconcile = tool(
+  "reconcile_statement",
+  "Run processor-agnostic reconciliation identities on extracted statement data. " +
+    "Returns each check with pass/fail and the exact discrepancy. The agent must " +
+    "NOT proceed to a quote unless all_passed is true.",
+  { statement: RawStatementSchema },          // the vision extraction
+  async ({ statement }) => {
+    const result = await run("python3", ["scripts/reconcile.py", "--json"], JSON.stringify(statement));
+    return { content: [{ type: "text", text: result }], structuredContent: JSON.parse(result) };
   },
 );
-// register: createSdkMcpServer({ name: "msa", tools: [parseFiserv, parsePaynuity, generateQuote, verifyQuote] })
+// plus generate_quote (openpyxl / xlsx skill) and verify_quote (re-evaluates formulas).
+// register: createSdkMcpServer({ name: "msa", tools: [reconcile, generateQuote, verifyQuote] })
 ```
 
-The tool returns the parser's own reconciliation result; the model is
-instructed never to emit a quote when `reconciliation.all_passed` is false.
+A failed reconciliation is fed back to the model with the failing identity and
+the relevant bounding-box crops, so the next pass re-reads exactly the cells in
+doubt. The regex parsers, where they exist, are registered as an *optional*
+fast-path tool the agent tries first — but the reconcile/verify tools are the
+contract, and they are identical whether extraction came from regex or vision.
 
 ---
 
@@ -227,11 +320,16 @@ instructed never to emit a quote when `reconciliation.all_passed` is false.
 Zero error is not a model property; it is a property of the gates. Five
 mechanisms, in order of importance:
 
-1. **Deterministic extraction + reconciliation, not LLM arithmetic.** Every
-   number on the quote traces to a Python-extracted value that passed the
-   processor's reconciliation formulas (`R1…Rn`). The proof-of-concept runs
-   16/16 (Fiserv) and 18/18 (Paynuity) on real statements; the gate refuses to
-   continue otherwise.
+1. **Deterministic reconciliation as the gate — even when extraction is a
+   vision-LLM.** The model may read the numbers, but no number reaches a quote
+   until it passes the processor-agnostic reconciliation identities (`R1…Rn`).
+   This is what makes vision extraction safe: a misread breaks an identity (a
+   sum stops closing), the agent is shown the failing identity plus the
+   bounding-box crop, and it re-reads until the arithmetic ties out — or the
+   statement is escalated. The proof-of-concept already runs this gate (16/16
+   Fiserv, 18/18 Paynuity) and aborts otherwise; vision extraction plugs into
+   the same gate unchanged. **Grounding to bounding boxes** is the partner
+   control: a hallucinated value has no valid source coordinate and is caught.
 2. **A second, independent verification of the output.** `verify_quote.py`
    re-evaluates the generated workbook's *formulas* with a separate engine and
    asserts the computed current total equals the parser total to the penny and
@@ -282,32 +380,53 @@ volume, transactions, card mix, rates, risk flags, and the reconciliation
 result. This matches the MSA-46 taxonomy and the v2 foundation
 (`statements` table with `raw_data` jsonb + `normalized_data` jsonb in Supabase):
 
-- `raw_data` ← the processor parser's full JSON output.
+- `raw_data` ← the full extraction JSON (`RawStatementData`), now including the
+  per-field bounding boxes from the vision pass and the reconciliation result.
 - `normalized_data` ← `NormalizedStatement`.
 - The most recent quote attaches to the merchant's gKey for SmartMPA reuse
   (feature-spec requirement).
 
-Multi-statement upload (same merchant, multiple months) is handled by running
-stages 1–4 per file and aggregating into a trend before stage 5 — the
-proof-of-concept already proves stages 1–4 are per-file and processor-agnostic.
+Storing the bounding boxes is what makes the output auditable: ops can click any
+figure on the quote and see the exact cell it was read from — the compliance and
+trust property the agentic-extraction literature centers on.
+
+Multi-statement upload (same merchant, multiple months) runs extraction +
+reconciliation per file and aggregates into a trend before quoting — the
+per-file stages are processor-agnostic by construction.
 
 ---
 
 ## 7. Build sequence
 
-1. **Lift the Python parsers as-is.** They are tested and reconcile. Whether
-   Option A (run in the hosted container) or B (custom tools), do not rewrite
-   them in TypeScript — that would re-introduce extraction risk for no gain.
-2. **Package the three skills** via the Skills API (Option A) or drop them in
-   `.claude/skills/` (Option B).
-3. **Wire the orchestrator** — `query()` loop (Agent SDK) or sessions + Outcome
-   (Managed Agents), with the reconciliation gate and the independent quote
-   verifier as non-negotiable steps.
-4. **TypeScript service surface** — REST/queue endpoint that takes a PDF + quote
-   settings, returns the workbook + a confidence report, persists both jsonb
-   blobs, and routes gate failures to the review queue.
-5. **Interchange-table refresh job** — scheduled `web_search`/`web_fetch` to keep
+The migration is deliberately staged so the deterministic guarantees come up
+first and extraction is swapped underneath them — never the reverse.
+
+1. **Stand up the deterministic verifier as a standalone, processor-agnostic
+   tool.** Lift the reconciliation identities out of the per-processor parsers
+   into one `reconcile.py` that takes `RawStatementData` and returns the
+   pass/fail checks, plus the existing `verify_quote.py`. This is the contract
+   everything else plugs into.
+2. **Turn the skills into vision-extraction guides.** Each `SKILL.md` keeps the
+   layout/fee-structure knowledge but reframes it as instructions for a vision
+   model reading the rendered page (what sections exist, what each fee means,
+   the gotchas) plus the `RawStatementData` JSON schema to emit — not a regex
+   script. Package via the Skills API (Option A) or `.claude/skills/` (Option B).
+3. **Build the extraction loop:** render PDF pages to images → vision-LLM emits
+   `RawStatementData` (structured output, grounded to bounding boxes) →
+   `reconcile` tool → on failure, feed the failing identity + bbox crops back
+   and retry (≤ N) → escalate to human queue. Keep the regex parsers registered
+   as an optional fast-path for the processors they already cover, and use them
+   as the **evaluation oracle** to measure the vision extractor's accuracy
+   before trusting it in production.
+4. **Wire the orchestrator** — sessions + Outcome (Managed Agents) or `query()`
+   loop (Agent SDK), with the reconciliation gate and the independent quote
+   verifier as non-negotiable steps; quote built by the `xlsx` skill / `openpyxl`.
+5. **TypeScript service surface** — REST/queue endpoint that takes a PDF + quote
+   settings, returns the workbook + a confidence + grounding report, persists
+   both jsonb blobs, and routes gate failures to the review queue.
+6. **Interchange-table refresh job** — scheduled `web_search`/`web_fetch` to keep
    reference rates fresh and flag staleness.
 
-The Python in this repo is the executable spec for stages 1–6; the TypeScript
-service is the agentic shell, skill loader, persistence, and API around it.
+The Python in this repo is the executable spec for the deterministic stages
+(reconcile, quote, verify); the vision-LLM replaces the regex extractor; the
+TypeScript service is the agentic shell, skill loader, persistence, and API.
